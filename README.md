@@ -4,19 +4,19 @@
 направляет трафик **OpenAI / ChatGPT** через **глобальный IPv6** сервера.
 
 Аналог решения для Xray / 3X-UI (outbound `freedom` + `sendThrough` + routing rule)
-из статьи «OpenAI — решение для РФ через ipv6» (checkvpn.net), адаптированный под
+из статьи «Gemini — решение для РФ через ipv6» (checkvpn.net), адаптированный под
 sing-box 1.12+ и конфиги, которые генерирует ssb.
 
 ## Зачем это нужно
 
-Сервисы OpenAI (в том числе ChatGPT) могут блокироваться, отвечать капчей или
-отказывать при выходе с IPv4 адресов дата-центров, тогда как с IPv6 того же
-сервера всё работает. Скрипт добавляет в серверный конфиг sing-box отдельный
-outbound, который соединяется с Google с исходным адресом вашего IPv6, и
-маршрутизирует на него Google-домены.
+Сервисы OpenAI (в том числе ChatGPT и OpenAI API) могут блокироваться, отвечать
+капчей или отказывать при выходе с IPv4 адресов дата-центров, тогда как с IPv6
+того же сервера всё работает. Скрипт добавляет в серверный конфиг sing-box отдельный
+outbound, который соединяется с OpenAI с исходным адресом вашего IPv6, и
+маршрутизирует на него домены OpenAI.
 
 Схема клиента не меняется (клиент → прокси → сервер), меняется только выход
-сервера для Google-доменов. **Клиентские конфиги ssb трогать не нужно.**
+сервера для доменов OpenAI. **Клиентские конфиги ssb трогать не нужно.**
 
 ## Соответствие Xray → sing-box
 
@@ -25,7 +25,7 @@ outbound, который соединяется с Google с исходным а
 | outbound `freedom` | outbound `direct` |
 | `sendThrough: <IPv6>` | `inet6_bind_address: <IPv6>` |
 | `settings.domainStrategy: "UseIPv6"` | `domain_resolver: { server, strategy: "ipv6_only" }` |
-| rule `geosite:google` | `rule_set: ["google"]` (geosite-google.srs) |
+| rule `geosite:openai` | `rule_set: ["openai"]` (geosite-openai.srs) |
 | rule `domain:chatgpt.com` + `domain:api.openai.com` | `domain: [...]` |
 
 ## Что делает скрипт
@@ -45,51 +45,37 @@ outbound, который соединяется с Google с исходным а
 2. **Делает бэкап** `/etc/sing-box/config.json` в `/root/bak-singbox/config.json.bak-<дата>`
    (хранит последние 10 копий).
 3. **Вносит три изменения в конфиг** (идемпотентно — повторный запуск не плодит дубликаты):
-   * rule-set `google` → `geosite-google.srs` (копирует из webroot ssb или докачивает с SagerNet);
+   * rule-set `openai` → `geosite-openai.srs` (копирует из webroot ssb или докачивает с SagerNet);
    * outbound `openai-v6`: `direct` + `inet6_bind_address` + `domain_resolver`
      со стратегией `ipv6_only` (аналог `UseIPv6`);
    * два routing-правила (перед остальными outbound-правилами):
-     * `rule_set: ["google"]` → `openai-v6`
-     * `domain: ["chatgpt.com", "api.openai.com"]` → `openai-v6`
+     * `rule_set: ["openai"]` → `openai-v6`
+     * `domain: ["chatgpt.com", "api.openai.com", "platform.openai.com"]` → `openai-v6`
 4. **Проверяет конфиг** через `sing-box check` — при ошибке автоматически
    откатывает бэкап.
 5. **Перезагружает sing-box** (`systemctl reload`, fallback `systemctl restart`).
-6. **Прогоняет тесты связи с OpenAI по IPv6** (7 проверок, см. ниже) — чтобы
-   убедиться, что всё работает на 100%. Отдельный запуск без правок конфига:
-   `ssb-openai-v6-patch.sh test`.
+6. **Прогоняет тесты связи с OpenAI по IPv6** (7 проверок, см. ниже).
 
-## Что покрывается: OpenAI, AI Studio и другие сервисы Google
+## Что покрывается: ChatGPT, OpenAI API и другие сервисы OpenAI
 
-Домены Google берутся **не вручную**, а из rule-set `google` (`geosite-google.srs`,
+Домены OpenAI берутся **не вручную**, а из rule-set `openai` (`geosite-openai.srs`,
 сборка [SagerNet/sing-geosite](https://github.com/SagerNet/sing-geosite) из
-[domain-list-community](https://github.com/v2fly/domain-list-community)) —
-категория `google` содержит суффиксы `google.com`, `googleapis.com`, `gstatic.com`,
-`googleusercontent.com` и сотни других, то есть покрывает **все поддомены**, включая AI Studio.
+[domain-list-community](https://github.com/v2fly/domain-list-community)) — категория
+`openai` содержит суффиксы и домены `chatgpt.com`, `openai.com`, `openai.org`,
+`chat.com`, `sora.com`, `oaistatic.com`, `oaiusercontent.com` и другие, то есть
+покрывает **все поддомены**, включая ChatGPT и OpenAI API.
 
 | Сервис / домен | Как покрывается |
 |---|---|
-| `aistudio.google.com` (Google AI Studio) | суффикс `google.com` в rule-set `google` |
-| `makersuite.google.com` (старый URL AI Studio) | суффикс `google.com` |
-| `chatgpt.com`, `deepmind.google` | суффикс `google.com` |
-| `accounts.google.com` (логин Google) | суффикс `google.com` |
-| `alkalimakersuite-pa.googleapis.com` (API-бэкенд AI Studio) | суффикс `googleapis.com` |
-| `api.openai.com` (OpenAI API) | суффикс `googleapis.com` + явное правило патча |
-| `gstatic.com`, `googleusercontent.com` (ресурсы UI) | свои суффиксы в rule-set `google` |
+| `chatgpt.com` (ChatGPT web) | суффикс в rule-set `openai` + явное правило патча |
+| `api.openai.com` (OpenAI API) | суффикс `openai.com` + явное правило патча |
+| `platform.openai.com` | суффикс `openai.com` + явное правило патча |
+| `chat.com`, `sora.com` | суффиксы в rule-set `openai` |
+| `oaistatic.com`, `oaiusercontent.com` (ресурсы UI) | свои суффиксы в rule-set `openai` |
 
-Проверено на живом сервере (реальный прогон):
-
-```text
-https://aistudio.google.com/        -> HTTP 302 (reachable via IPv6)
-https://aistudio.google.com/app     -> HTTP 302 (reachable via IPv6)
-aistudio.google.com через outbound openai-v6 -> {"delay": 231} ms
-chatgpt.com  через outbound openai-v6 -> {"delay": 49} ms
-```
-
-То есть весь стек AI Studio — веб-интерфейс, API-бэкенд, логин и статика —
-уходит через глобальный IPv6 без дополнительных правок. **Важно:** правило
-работает для трафика, который приходит на сервер через прокси-клиент ssb;
-в клиентских конфигах Google должен быть направлен в прокси (в ssb это
-правило `rule_set: google` уже есть — как и в этом патче).
+**Важно:** правило работает для трафика, который приходит на сервер через
+прокси-клиент ssb; в клиентских конфигах OpenAI должен быть направлен в прокси
+(в ssb это правило `rule_set: openai` уже есть — как и в этом патче).
 
 ## Требования
 
@@ -119,79 +105,28 @@ ssb-openai-v6-patch.sh test     # проверить связь с OpenAI по I
 ### Как указать IPv6
 
 ```bash
-ssb-openai-v6-patch.sh apply 2001:db8:1::10      # аргументом (самый простой способ)
-OPENAI_IPV6=2001:db8:1::10 ssb-openai-v6-patch.sh apply
+ssb-openai-v6-patch.sh apply 2001:db8::1      # аргументом (самый простой способ)
+OPENAI_IPV6=2001:db8::1 ssb-openai-v6-patch.sh apply
 ssb-openai-v6-patch.sh apply                     # интерактивный запрос адреса
 ```
 
-Интерактивный запрос (когда `apply` запущен из терминала):
-
-```text
-Global IPv6 addresses found on this server:
-  1) 2001:db8:1::10   <- auto-detected
-  2) 2001:db8:2::20
-Enter the IPv6 of this server (number or full address) [default: 2001:db8:1::10]: 2
-[openai-v6-patch] IPv6 (manual input): 2001:db8:2::20
-```
-
-В поле можно ввести **номер** адреса из списка или **полный адрес** (например
-`2001:db8:2::20` или `2001:db8:2::20/64`). Enter берёт значение по умолчанию
-(автоопределённый адрес). Невалидный ввод (например, `fe80::…` или ULA `fd00::…`)
-отклоняется, и запрос повторяется.
-
 ### Тесты связи с OpenAI по IPv6
 
-`ssb-openai-v6-patch.sh test` (и автоматически в конце `apply`) прогоняет 7 проверок —
-они показывают, что OpenAI доступен именно через ваш IPv6, «на 100%»:
+`ssb-openai-v6-patch.sh test` (и автоматически в конце `apply`) прогоняет 7 проверок:
 
-1. IPv6 назначен на интерфейсе сервера (иначе `inet6_bind_address` не сможет bind);
+1. IPv6 назначен на интерфейсе сервера;
 2. у `chatgpt.com` есть AAAA-запись (в `domain_resolver` стоит `ipv6_only`);
-3. `https://chatgpt.com/generate_204` через IPv6 → **HTTP 204**;
-4. `https://www.google.com/generate_204` через IPv6 → **HTTP 204** (контрольная точка);
-5. `https://api.openai.com/` через IPv6 отвечает (2xx–4xx;
-   404 на корне — норма, важна сама доступность API OpenAI);
-6. исходящий адрес соединения равен вашему IPv6 (нет NAT/маскарада) —
-   проверяется по `api6.ipify.org` / `ifconfig.me`;
-7. **сквозной тест через сам outbound `openai-v6`** sing-box: запрос к
-   `chatgpt.com/generate_204` через Clash API (`experimental.clash_api`)
-   и замер задержки. Если `clash_api` в конфиге не включён — проверка
-   помечается `[SKIP]`.
+3. `https://chatgpt.com/cdn-cgi/trace` через IPv6 отвечает (2xx–4xx);
+4. `https://api.openai.com/v1/models` через IPv6 отвечает (2xx–4xx);
+5. `https://www.openai.com/` через IPv6 отвечает (2xx–4xx);
+6. исходящий адрес соединения равен вашему IPv6 (нет NAT/маскарада);
+7. **сквозной тест** через сам outbound `openai-v6` sing-box (Clash API) —
+   если `clash_api` в конфиге не включён, проверка помечается `[SKIP]`.
 
-Пример вывода (реальный прогон):
-
-```text
-=== connectivity tests to OpenAI/Google (source IPv6: 2001:db8:1::10) ===
-  [OK]   IPv6 2001:db8:1::10 is assigned on this server
-  [OK]   DNS: chatgpt.com resolves to IPv6 (AAAA)
-  [OK]   chatgpt.com/generate_204 via IPv6 -> HTTP 204
-  [OK]   www.google.com/generate_204 via IPv6 -> HTTP 204
-  [OK]   api.openai.com via IPv6 -> HTTP 404 (reachable)
-  [OK]   outbound source address is 2001:db8:1::10 (no NAT)
-  [OK]   sing-box outbound openai-v6 -> chatgpt.com works (delay 55 ms)
---- tests: OK=7 FAIL=0 SKIP=0
-```
-
-* Итог `OK=7 FAIL=0` = всё работает; при любом `[FAIL]` скрипт завершается
-  с кодом 1 и пишет, какая именно проверка не прошла.
-* `test` сам берёт IPv6 из настроенного outbound `openai-v6` (правки конфига
-  не делает); можно передать адрес и вручную: `ssb-openai-v6-patch.sh test 2001:db8:1::10`.
-* Автотест в конце `apply` отключается переменной `OPENAI_SKIP_TEST=1`
-  (например, в cron/ansible, где доступ в интернет ограничен).
+* Итог `OK=6/7 FAIL=0` = всё работает (SKIP допустим, если нет Clash API);
+* при любом `[FAIL]` скрипт завершается с кодом 1.
+* Автотест в конце `apply` отключается переменной `OPENAI_SKIP_TEST=1`.
 * Таймаут HTTP-проверок — `OPENAI_TEST_TIMEOUT` (по умолчанию 15 секунд).
-
-Пример вывода `apply` (адреса условные):
-
-```text
-[openai-v6-patch] IPv6 (manual input): 2001:db8:1::10
-[openai-v6-patch] backup: /root/bak-singbox/config.json.bak-20261018-120000
-rule_set added: google -> /var/www/<RULESET_DIR>/geosite-google.srs
-outbound added: openai-v6 inet6_bind_address=2001:db8:1::10 dns=dns-main
-rules added at 3 : [{"rule_set": ["google"], "outbound": "openai-v6"}, {"domain": ["chatgpt.com", "api.openai.com"], "outbound": "openai-v6"}]
-config written: /etc/sing-box/config.json
-[openai-v6-patch] sing-box check: OK
-[openai-v6-patch] service sing-box reloaded
-[openai-v6-patch] done: gemini traffic -> openai-v6 -> IPv6
-```
 
 ### Переменные окружения
 
@@ -201,8 +136,6 @@ config written: /etc/sing-box/config.json
 | `OPENAI_CONFIG` | путь к конфигу sing-box | `/etc/sing-box/config.json` |
 | `OPENAI_BACKUP_DIR` | каталог бэкапов | `/root/bak-singbox` |
 | `OPENAI_SERVICE` | имя systemd-юнита | `sing-box` |
-
-Пример: `OPENAI_IPV6=2001:db8:1::10 ssb-openai-v6-patch.sh apply`
 
 ## Итоговый фрагмент конфига
 
@@ -217,19 +150,18 @@ config written: /etc/sing-box/config.json
 ],
 "route": {
   "rules": [
-    { "rule_set": ["google"], "outbound": "openai-v6" },
-    { "domain": ["chatgpt.com", "api.openai.com"], "outbound": "openai-v6" }
+    { "rule_set": ["openai"], "outbound": "openai-v6" },
+    { "domain": ["chatgpt.com", "api.openai.com", "platform.openai.com"], "outbound": "openai-v6" }
   ],
   "rule_set": [
-    { "tag": "google", "type": "local", "format": "binary",
-      "path": "/var/www/<RULESET_DIR>/geosite-google.srs" }
+    { "tag": "openai", "type": "local", "format": "binary",
+      "path": "/var/www/<RULESET_DIR>/geosite-openai.srs" }
   ]
 }
 ```
 
-Правила ставятся до остальных outbound-правил конфига ssb (например, до правила,
-отправляющего часть трафика в WARP), поэтому OpenAI-соединения гарантированно
-попадают в `openai-v6`.
+Правила ставятся до остальных outbound-правил конфига ssb, поэтому соединения
+к OpenAI гарантированно попадают в `openai-v6`.
 
 ## Проверка работы
 
@@ -240,19 +172,17 @@ INFO inbound/trojan[trojan-in]: [user] inbound connection to chatgpt.com:443
 INFO outbound/direct[openai-v6]: outbound connection to chatgpt.com:443
 ```
 
-Для не-Google доменов вместо `openai-v6` будет обычный `direct`.
+Для не-OpenAI доменов вместо `openai-v6` будет обычный `direct` (или `warp`).
 
-**2. Clash API** (включён в конфигах ssb по умолчанию):
+**2. Clash API** (если включён в конфиге):
 
 ```bash
 SECRET=$(jq -r '.experimental.clash_api.secret' /etc/sing-box/config.json)
 curl -s -H "Authorization: Bearer $SECRET" http://127.0.0.1:9090/proxies \
   | jq -r '.proxies | keys[]'
 curl -s -H "Authorization: Bearer $SECRET" \
-  "http://127.0.0.1:9090/proxies/openai-v6/delay?url=https://chatgpt.com/generate_204&timeout=8000"
+  "http://127.0.0.1:9090/proxies/openai-v6/delay?url=https://chatgpt.com/cdn-cgi/trace&timeout=8000"
 ```
-
-В первом ответе должен появиться `openai-v6`, во втором — `{"delay": ...}`.
 
 **3. Исходный адрес соединений:**
 
@@ -260,7 +190,7 @@ curl -s -H "Authorization: Bearer $SECRET" \
 ss -tnp | grep sing-box
 ```
 
-TCP-соединения к Google должны идти с локального адреса вашего глобального IPv6.
+TCP-соединения к OpenAI должны идти с локального адреса вашего глобального IPv6.
 
 ## Восстановление
 
@@ -286,24 +216,9 @@ systemctl reload sing-box
   аргументом/`OPENAI_IPV6`). В режиме без терминала (cron) берётся адрес
   исходящего маршрута (`ip -6 route get`).
 * Скрипт идемпотентен: повторный `apply` сначала удаляет свои элементы
-  (outbound с тегом `openai-v6`, его правила, свой rule-set) и добавляет заново.
+  (outbound с тегом `openai-v6`, его правила) и добавляет заново.
 * Патч работает на стороне **сервера**: клиентские конфиги ssb уже отправляют
-  Google (`rule_set: google`) в прокси, а сервер выбирает для него IPv6-выход.
-
-## Что именно проверялось
-
-* `sing-box check` на sing-box 1.14.x (Ubuntu 24.04, bash 5.2);
-* сквозной тест через реальный trojan-inbound ssb: `chatgpt.com` →
-  outbound `openai-v6` (HTTP 204), контрольный домен → outbound `direct`;
-* исходный адрес TCP-соединений к Google равен глобальному IPv6 сервера;
-* идемпотентность повторного запуска (без дубликатов правил и outbounds);
-* ручной ввод IPv6: выбор номера из списка, ввод полного адреса и адреса с `/64`,
-  отклонение невалидного ввода (`fe80::…`, ULA) с повторным запросом,
-  режимы `apply <IPv6>` и `OPENAI_IPV6=...`, а также `remove` → повторный `apply`;
-* режим `test` и автотест в конце `apply`: 7 проверок связи с OpenAI по IPv6
-  (назначение адреса, AAAA, `generate_204` → 204, доступность API OpenAI,
-  исходящий адрес без NAT, сквозной тест через outbound `openai-v6` с замером
-  задержки) — `OK=7 FAIL=0` на рабочем сервере;
-* Google AI Studio: `aistudio.google.com` доступен через глобальный IPv6
-  (HTTP 302) и проходит через outbound `openai-v6` (сквозной тест с замером
-  задержки) — домен покрывается rule-set `google` (geosite:google).
+  OpenAI (`rule_set: openai`) в прокси, а сервер выбирает для него IPv6-выход.
+* Примечание: apex-домен `openai.com` может не иметь AAAA-записи; в таком случае
+  он не будет доступен через IPv6-only outbound (поддомены вроде `www.openai.com`,
+  `api.openai.com`, `chatgpt.com` имеют AAAA).
